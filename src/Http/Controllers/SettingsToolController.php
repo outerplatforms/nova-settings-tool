@@ -2,25 +2,35 @@
 
 namespace Bakerkretzmar\NovaSettingsTool\Http\Controllers;
 
-use Bakerkretzmar\NovaSettingsTool\Events\SettingsChanged;
 use Illuminate\Http\Request;
-use Spatie\Valuestore\Valuestore;
+use Illuminate\Support\Str;
 
 class SettingsToolController
 {
     protected $store;
 
-    public function __construct()
+    public function getKeyParts($key)
     {
-        $this->store = Valuestore::make(
-            config('nova-settings-tool.path', storage_path('app/settings.json'))
-        );
+        $keyParts = explode('.', $key);
+        $keyGroup = array_shift($keyParts);
+        $keyName = implode('.', $keyParts);
+
+        return [$keyGroup, $keyName];
+    }
+
+    public function getSettings($group)
+    {
+        $class = '\App\Settings\\'.Str::studly($group).'Settings';
+
+        if (! class_exists($class)) {
+            return null;
+        }
+
+        return app($class);
     }
 
     public function read()
     {
-        $values = $this->store->all();
-
         $settings = collect(config('nova-settings-tool.settings'));
 
         $panels = $settings->where('panel', '!=', null)->pluck('panel')->unique()
@@ -32,11 +42,19 @@ class SettingsToolController
             })
             ->all();
 
-        $settings = $settings->map(function ($setting) use ($values) {
+        $settings = $settings->map(function ($setting) {
+            [$keyGroup, $keyName] = $this->getKeyParts($setting['key']);
+
+            $settings = $this->getSettings($keyGroup);
+
+            if (! property_exists($settings, $keyName)) {
+                return null;
+            }
+
             return array_merge([
                 'type' => 'text',
                 'label' => ucfirst($setting['key']),
-                'value' => $values[$setting['key']] ?? null,
+                'value' => $settings->{$keyName} ?? null,
             ], $setting);
         })
             ->keyBy('key')
@@ -51,13 +69,19 @@ class SettingsToolController
 
     public function write(Request $request)
     {
-        $oldSettings = $this->store->all();
-
         foreach ($request->all() as $key => $value) {
-            $this->store->put($key, $value);
-        }
+            [$keyGroup, $keyName] = $this->getKeyParts($key);
 
-        event(new SettingsChanged($this->store->all(), $oldSettings));
+            $settings = $this->getSettings($keyGroup);
+
+            if (! property_exists($settings, $keyName)) {
+                return null;
+            }
+
+            $settings->{$keyName} = $value;
+
+            $settings->save();
+        }
 
         return response()->json();
     }
